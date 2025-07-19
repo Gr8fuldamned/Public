@@ -1,0 +1,53 @@
+blueprint:
+  name: ESP-Multi-button
+  description: |
+    Generic automation blueprint for a button entity that exposes
+    "single", "double", and "hold" states. Each state triggers a
+    separate configurable action.
+  domain: automation
+  input:
+    button_sensor:
+      name: Button Action Sensor
+      description: Sensor entity whose state changes to `single`, `double`, or `hold`.
+      selector:
+        entity:
+          domain: sensor
+    single_action:
+      name: Single Press Action
+      selector:
+        action: {}
+      default: []
+    double_action:
+      name: Double Press Action
+      selector:
+        action: {}
+      default: []
+    hold_action:
+      name: Hold Action
+      selector:
+        action: {}
+      default: []
+
+trigger:
+  - platform: state
+    entity_id: !input button_sensor
+    to: single
+    id: single
+  - platform: state
+    entity_id: !input button_sensor
+    to: double
+    id: double
+  - platform: state
+    entity_id: !input button_sensor
+    to: hold
+    id: hold
+
+action:
+  - choose:
+      - conditions: "{{ trigger.id == 'single' }}"
+        sequence: !input single_action
+      - conditions: "{{ trigger.id == 'double' }}"
+        sequence: !input double_action
+      - conditions: "{{ trigger.id == 'hold' }}"
+        sequence: !input hold_action
+mode: single
