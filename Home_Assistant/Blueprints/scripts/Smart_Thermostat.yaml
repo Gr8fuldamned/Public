@@ -1,0 +1,133 @@
+blueprint:
+  name: Smart Thermostat Apply
+  description: >
+    Script blueprint that applies a smart thermostat strategy by toggling
+    HVAC modes based on indoor/outdoor conditions, desired temperature, and
+    configurable lockouts to avoid short cycling.
+  domain: script
+  input:
+    climate_entity:
+      name: Target Climate Entity
+      selector:
+        entity:
+          domain: climate
+    indoor_sensor:
+      name: Indoor Temperature Sensor
+      selector:
+        entity:
+          domain: sensor
+    outdoor_sensor:
+      name: Outdoor Temperature Sensor
+      selector:
+        entity:
+          domain: sensor
+    desired_temperature:
+      name: Desired Temperature Number
+      selector:
+        entity:
+          domain: input_number
+    deadband_input:
+      name: Deadband Number
+      selector:
+        entity:
+          domain: input_number
+    min_hold_input:
+      name: Minimum Hold Minutes Number
+      selector:
+        entity:
+          domain: input_number
+    heat_lockout_input:
+      name: Heat Lockout Outdoor Temperature Number
+      selector:
+        entity:
+          domain: input_number
+    cool_lockout_input:
+      name: Cool Lockout Outdoor Temperature Number
+      selector:
+        entity:
+          domain: input_number
+    last_mode_input:
+      name: Last Mode Input Select
+      selector:
+        entity:
+          domain: input_select
+    last_change_input:
+      name: Last Change DateTime
+      selector:
+        entity:
+          domain: input_datetime
+    enable_boolean:
+      name: Enable Smart Thermostat
+      selector:
+        entity:
+          domain: input_boolean
+
+mode: single
+variables:
+  target_climate: !input climate_entity
+  indoor_sensor: !input indoor_sensor
+  outdoor_sensor: !input outdoor_sensor
+  desired_number: !input desired_temperature
+  deadband_number: !input deadband_input
+  min_hold_number: !input min_hold_input
+  heat_lockout_number: !input heat_lockout_input
+  cool_lockout_number: !input cool_lockout_input
+  last_mode_select: !input last_mode_input
+  last_change_datetime: !input last_change_input
+  enable_flag: !input enable_boolean
+  indoor: "{{ states(indoor_sensor)|float(0) }}"
+  outdoor: "{{ states(outdoor_sensor)|float(0) }}"
+  desired: "{{ states(desired_number)|float(72) }}"
+  deadband: "{{ states(deadband_number)|float(1.0) }}"
+  min_hold: "{{ states(min_hold_number)|int(15) }}"
+  now_ts: "{{ now().timestamp() }}"
+  last_ts: "{{ as_timestamp(states(last_change_datetime))|default(0) }}"
+  held_long_enough: "{{ (now_ts - last_ts) > (min_hold * 60) }}"
+  heat_lockout: "{{ states(heat_lockout_number)|float(68) }}"
+  cool_lockout: "{{ states(cool_lockout_number)|float(60) }}"
+  last_mode: "{{ states(last_mode_select) }}"
+  hvac_modes: "{{ state_attr(target_climate, 'hvac_modes') | default([]) }}"
+  supports_off: "{{ 'off' in hvac_modes }}"
+  need_heat: "{{ indoor < (desired - deadband) and outdoor < heat_lockout }}"
+  need_cool: "{{ indoor > (desired + deadband) and outdoor > cool_lockout }}"
+  next_mode: >
+    {% if need_heat %} heat
+    {% elif need_cool %} cool
+    {% else %} {{ 'off' if supports_off else last_mode }}
+    {% endif %}
+sequence:
+  - condition: template
+    value_template: "{{ is_state(enable_flag, 'on') }}"
+
+  - condition: template
+    value_template: "{{ held_long_enough or next_mode == last_mode }}"
+
+  - choose:
+      - conditions: "{{ next_mode != last_mode }}"
+        sequence:
+          - service: climate.set_hvac_mode
+            target:
+              entity_id: "{{ target_climate }}"
+            data:
+              hvac_mode: "{{ next_mode }}"
+
+          - service: input_select.select_option
+            target:
+              entity_id: "{{ last_mode_select }}"
+            data:
+              option: "{{ next_mode }}"
+
+          - service: input_datetime.set_datetime
+            target:
+              entity_id: "{{ last_change_datetime }}"
+            data:
+              datetime: "{{ now().strftime('%Y-%m-%d %H:%M:%S') }}"
+
+  - choose:
+      - conditions: "{{ next_mode in ['heat','cool'] }}"
+        sequence:
+          - service: climate.set_temperature
+            target:
+              entity_id: "{{ target_climate }}"
+            data:
+              temperature: "{{ desired | round(1) }}"
