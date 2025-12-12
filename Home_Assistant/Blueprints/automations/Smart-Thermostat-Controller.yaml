@@ -1,0 +1,57 @@
+blueprint:
+  name: Smart Thermostat Controller
+  description: >
+    Automation blueprint that periodically and reactively triggers the smart
+    thermostat apply script when temperature sensors, desired setpoint, or the
+    enable flag change.
+  domain: automation
+  input:
+    apply_script:
+      name: Smart Thermostat Apply Script
+      description: Script created from the Smart Thermostat Apply blueprint.
+      selector:
+        entity:
+          domain: script
+    indoor_sensor:
+      name: Indoor Temperature Sensor
+      selector:
+        entity:
+          domain: sensor
+    outdoor_sensor:
+      name: Outdoor Temperature Sensor
+      selector:
+        entity:
+          domain: sensor
+    desired_temperature:
+      name: Desired Temperature Number
+      selector:
+        entity:
+          domain: input_number
+    enable_boolean:
+      name: Enable Smart Thermostat
+      selector:
+        entity:
+          domain: input_boolean
+    interval_minutes:
+      name: Recheck Interval (minutes)
+      default: 5
+      selector:
+        number:
+          min: 1
+          max: 60
+          step: 1
+          mode: slider
+trigger:
+  - platform: time_pattern
+    minutes: "/{{ interval_minutes }}"
+  - platform: state
+    entity_id:
+      - !input indoor_sensor
+      - !input outdoor_sensor
+      - !input desired_temperature
+      - !input enable_boolean
+mode: queued
+action:
+  - service: script.turn_on
+    target:
+      entity_id: !input apply_script
