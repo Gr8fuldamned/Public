@@ -1,133 +1,671 @@
 blueprint:
-  name: Smart Thermostat Apply
+  name: Smart Thermostat Engine (Script) - Dedicated Setpoints
   description: >
-    Script blueprint that applies a smart thermostat strategy by toggling
-    HVAC modes based on indoor/outdoor conditions, desired temperature, and
-    configurable lockouts to avoid short cycling.
+    Script-based "smart thermostat" decision engine. Averages multiple sensors (°F/%),
+    applies absolute range clamps, determines Home/Away from person entities, selects
+    HVAC mode using outdoor thresholds with a hold band plus indoor temp overrides
+    and indoor humidity bias/override, then applies dedicated setpoints with anti-flap
+    and anti-chatter controls.
+
+    Designed to be called by a wrapper automation (continuous reactions) and/or your
+    bedtime/alarm automations (profile changes).
   domain: script
+
   input:
     climate_entity:
-      name: Target Climate Entity
+      name: Thermostat
       selector:
         entity:
           domain: climate
-    indoor_sensor:
-      name: Indoor Temperature Sensor
+
+    persons:
+      name: People (Home if any are home)
       selector:
         entity:
-          domain: sensor
-    outdoor_sensor:
-      name: Outdoor Temperature Sensor
-      selector:
-        entity:
-          domain: sensor
-    desired_temperature:
-      name: Desired Temperature Number
-      selector:
-        entity:
-          domain: input_number
-    deadband_input:
-      name: Deadband Number
-      selector:
-        entity:
-          domain: input_number
-    min_hold_input:
-      name: Minimum Hold Minutes Number
-      selector:
-        entity:
-          domain: input_number
-    heat_lockout_input:
-      name: Heat Lockout Outdoor Temperature Number
-      selector:
-        entity:
-          domain: input_number
-    cool_lockout_input:
-      name: Cool Lockout Outdoor Temperature Number
-      selector:
-        entity:
-          domain: input_number
-    last_mode_input:
-      name: Last Mode Input Select
+          multiple: true
+          domain: person
+
+    thermostat_profile:
+      name: Thermostat profile helper (input_select)
+      description: >
+        Expected options: normal, sleep, wake. The script will use this unless you pass
+        a runtime variable "profile".
       selector:
         entity:
           domain: input_select
-    last_change_input:
-      name: Last Change DateTime
-      selector:
-        entity:
-          domain: input_datetime
-    enable_boolean:
-      name: Enable Smart Thermostat
+
+    smart_thermostat_enabled:
+      name: Smart Thermostat enabled helper (input_boolean) (optional)
+      description: >
+        Optional helper to allow disabling the script without removing the automation.
+        Leave blank to always run.
+      default: ''
       selector:
         entity:
           domain: input_boolean
 
+    # --- Sensors (multi-select) ---
+    outdoor_temp_sensors:
+      name: Outdoor temperature sensors (°F)
+      selector:
+        entity:
+          multiple: true
+          domain: sensor
+
+    outdoor_humidity_sensors:
+      name: Outdoor humidity sensors (%)
+      selector:
+        entity:
+          multiple: true
+          domain: sensor
+
+    indoor_temp_sensors:
+      name: Indoor temperature sensors (°F) (optional)
+      description: Leave empty to disable indoor temperature overrides.
+      default: []
+      selector:
+        entity:
+          multiple: true
+          domain: sensor
+
+    indoor_humidity_sensors:
+      name: Indoor humidity sensors (%)
+      default: []
+      selector:
+        entity:
+          multiple: true
+          domain: sensor
+
+    # --- Absolute range clamps ---
+    outdoor_temp_min:
+      name: Outdoor temp minimum (°F)
+      default: -20
+      selector:
+        number:
+          min: -60
+          max: 160
+          step: 1
+          mode: box
+
+    outdoor_temp_max:
+      name: Outdoor temp maximum (°F)
+      default: 120
+      selector:
+        number:
+          min: -60
+          max: 160
+          step: 1
+          mode: box
+
+    indoor_temp_min:
+      name: Indoor temp minimum (°F)
+      default: 45
+      selector:
+        number:
+          min: 0
+          max: 120
+          step: 1
+          mode: box
+
+    indoor_temp_max:
+      name: Indoor temp maximum (°F)
+      default: 95
+      selector:
+        number:
+          min: 0
+          max: 120
+          step: 1
+          mode: box
+
+    outdoor_humidity_min:
+      name: Outdoor humidity minimum (%)
+      default: 0
+      selector:
+        number:
+          min: 0
+          max: 100
+          step: 1
+          mode: box
+
+    outdoor_humidity_max:
+      name: Outdoor humidity maximum (%)
+      default: 100
+      selector:
+        number:
+          min: 0
+          max: 100
+          step: 1
+          mode: box
+
+    indoor_humidity_min:
+      name: Indoor humidity minimum (%)
+      default: 0
+      selector:
+        number:
+          min: 0
+          max: 100
+          step: 1
+          mode: box
+
+    indoor_humidity_max:
+      name: Indoor humidity maximum (%)
+      default: 100
+      selector:
+        number:
+          min: 0
+          max: 100
+          step: 1
+          mode: box
+
+    # --- Outdoor mode thresholds with hold band ---
+    cool_outdoor_threshold:
+      name: Outdoor temp ≥ this → Cool (°F)
+      default: 78
+      selector:
+        number:
+          min: 40
+          max: 110
+          step: 1
+          mode: box
+
+    heat_outdoor_threshold:
+      name: Outdoor temp ≤ this → Heat (°F)
+      default: 62
+      selector:
+        number:
+          min: 0
+          max: 80
+          step: 1
+          mode: box
+
+    # --- Indoor temperature overrides (only if indoor_temp_sensors provided) ---
+    indoor_too_hot:
+      name: Indoor temp ≥ this → force Cool (°F)
+      default: 76
+      selector:
+        number:
+          min: 50
+          max: 95
+          step: 1
+          mode: box
+
+    indoor_too_cold:
+      name: Indoor temp ≤ this → force Heat (°F)
+      default: 66
+      selector:
+        number:
+          min: 40
+          max: 85
+          step: 1
+          mode: box
+
+    # --- Indoor humidity baseline + deltas ---
+    indoor_rh_standard:
+      name: Indoor RH standard (%)
+      default: 45
+      selector:
+        number:
+          min: 0
+          max: 100
+          step: 1
+          mode: box
+
+    indoor_rh_bias_delta:
+      name: Bias delta above standard (%) → prefer Cool in hold band
+      default: 10
+      selector:
+        number:
+          min: 0
+          max: 50
+          step: 1
+          mode: box
+
+    indoor_rh_override_delta:
+      name: Override delta above standard (%) → force Cool
+      default: 20
+      selector:
+        number:
+          min: 0
+          max: 50
+          step: 1
+          mode: box
+
+    # --- Dedicated setpoints (°F) ---
+    home_normal_heat:
+      name: Home - Normal - Heat setpoint (°F)
+      default: 69
+      selector:
+        number:
+          min: 45
+          max: 85
+          step: 0.5
+          mode: box
+
+    home_normal_cool:
+      name: Home - Normal - Cool setpoint (°F)
+      default: 74
+      selector:
+        number:
+          min: 60
+          max: 90
+          step: 0.5
+          mode: box
+
+    home_sleep_heat:
+      name: Home - Sleep - Heat setpoint (°F)
+      default: 67
+      selector:
+        number:
+          min: 45
+          max: 85
+          step: 0.5
+          mode: box
+
+    home_sleep_cool:
+      name: Home - Sleep - Cool setpoint (°F)
+      default: 72
+      selector:
+        number:
+          min: 60
+          max: 90
+          step: 0.5
+          mode: box
+
+    home_wake_heat:
+      name: Home - Wake - Heat setpoint (°F)
+      default: 70
+      selector:
+        number:
+          min: 45
+          max: 85
+          step: 0.5
+          mode: box
+
+    home_wake_cool:
+      name: Home - Wake - Cool setpoint (°F)
+      default: 74
+      selector:
+        number:
+          min: 60
+          max: 90
+          step: 0.5
+          mode: box
+
+    away_heat:
+      name: Away - Heat setpoint (°F)
+      default: 62
+      selector:
+        number:
+          min: 45
+          max: 85
+          step: 0.5
+          mode: box
+
+    away_cool:
+      name: Away - Cool setpoint (°F)
+      default: 80
+      selector:
+        number:
+          min: 60
+          max: 90
+          step: 0.5
+          mode: box
+
+    # --- Anti-flap / anti-chatter controls ---
+    min_minutes_between_mode_changes:
+      name: Minimum minutes between HVAC mode changes
+      default: 30
+      selector:
+        number:
+          min: 30
+          max: 240
+          step: 15
+          mode: slider
+
+    min_setpoint_change_f:
+      name: Minimum setpoint change required (°F)
+      default: 0.5
+      selector:
+        number:
+          min: 0.5
+          max: 5
+          step: 0.5
+          mode: slider
+
+    min_minutes_between_setpoint_changes:
+      name: Minimum minutes between setpoint changes
+      default: 15
+      selector:
+        number:
+          min: 0
+          max: 240
+          step: 5
+          mode: slider
+
+    # --- State tracking helpers (epoch seconds) ---
+    last_mode_change_epoch:
+      name: Helper - last mode change epoch (input_number)
+      description: >
+        input_number storing epoch seconds. The script will update it whenever it changes hvac mode.
+      selector:
+        entity:
+          domain: input_number
+
+    last_setpoint_change_epoch:
+      name: Helper - last setpoint change epoch (input_number)
+      description: >
+        input_number storing epoch seconds. The script will update it whenever it changes setpoint.
+      selector:
+        entity:
+          domain: input_number
+
+    debug_log:
+      name: Debug logbook entries
+      default: false
+      selector:
+        boolean:
+
 mode: single
-variables:
-  target_climate: !input climate_entity
-  indoor_sensor: !input indoor_sensor
-  outdoor_sensor: !input outdoor_sensor
-  desired_number: !input desired_temperature
-  deadband_number: !input deadband_input
-  min_hold_number: !input min_hold_input
-  heat_lockout_number: !input heat_lockout_input
-  cool_lockout_number: !input cool_lockout_input
-  last_mode_select: !input last_mode_input
-  last_change_datetime: !input last_change_input
-  enable_flag: !input enable_boolean
-  indoor: "{{ states(indoor_sensor)|float(0) }}"
-  outdoor: "{{ states(outdoor_sensor)|float(0) }}"
-  desired: "{{ states(desired_number)|float(72) }}"
-  deadband: "{{ states(deadband_number)|float(1.0) }}"
-  min_hold: "{{ states(min_hold_number)|int(15) }}"
-  now_ts: "{{ now().timestamp() }}"
-  last_ts: "{{ as_timestamp(states(last_change_datetime))|default(0) }}"
-  held_long_enough: "{{ (now_ts - last_ts) > (min_hold * 60) }}"
-  heat_lockout: "{{ states(heat_lockout_number)|float(68) }}"
-  cool_lockout: "{{ states(cool_lockout_number)|float(60) }}"
-  last_mode: "{{ states(last_mode_select) }}"
-  hvac_modes: "{{ state_attr(target_climate, 'hvac_modes') | default([]) }}"
-  supports_off: "{{ 'off' in hvac_modes }}"
-  need_heat: "{{ indoor < (desired - deadband) and outdoor < heat_lockout }}"
-  need_cool: "{{ indoor > (desired + deadband) and outdoor > cool_lockout }}"
-  next_mode: >
-    {% if need_heat %} heat
-    {% elif need_cool %} cool
-    {% else %} {{ 'off' if supports_off else last_mode }}
-    {% endif %}
 sequence:
-  - condition: template
-    value_template: "{{ is_state(enable_flag, 'on') }}"
+  - variables:
+      climate_entity: !input climate_entity
+      persons: !input persons
+      profile_helper: !input thermostat_profile
+      enabled_helper: !input smart_thermostat_enabled
+
+      outdoor_temp_sensors: !input outdoor_temp_sensors
+      outdoor_humidity_sensors: !input outdoor_humidity_sensors
+      indoor_temp_sensors: !input indoor_temp_sensors
+      indoor_humidity_sensors: !input indoor_humidity_sensors
+
+      out_t_min: !input outdoor_temp_min
+      out_t_max: !input outdoor_temp_max
+      in_t_min: !input indoor_temp_min
+      in_t_max: !input indoor_temp_max
+      out_rh_min: !input outdoor_humidity_min
+      out_rh_max: !input outdoor_humidity_max
+      in_rh_min: !input indoor_humidity_min
+      in_rh_max: !input indoor_humidity_max
+
+      cool_thr: !input cool_outdoor_threshold
+      heat_thr: !input heat_outdoor_threshold
+
+      in_t_hot: !input indoor_too_hot
+      in_t_cold: !input indoor_too_cold
+
+      rh_std: !input indoor_rh_standard
+      rh_bias_delta: !input indoor_rh_bias_delta
+      rh_override_delta: !input indoor_rh_override_delta
+
+      home_normal_heat: !input home_normal_heat
+      home_normal_cool: !input home_normal_cool
+      home_sleep_heat: !input home_sleep_heat
+      home_sleep_cool: !input home_sleep_cool
+      home_wake_heat: !input home_wake_heat
+      home_wake_cool: !input home_wake_cool
+      away_heat: !input away_heat
+      away_cool: !input away_cool
+
+      min_mode_mins: !input min_minutes_between_mode_changes
+      min_set_delta: !input min_setpoint_change_f
+      min_set_mins: !input min_minutes_between_setpoint_changes
+
+      last_mode_epoch_entity: !input last_mode_change_epoch
+      last_set_epoch_entity: !input last_setpoint_change_epoch
+
+      debug: !input debug_log
+
+      now_epoch: "{{ as_timestamp(now()) }}"
+
+      enabled: >-
+        {% if enabled_helper in ['', none] %}
+          true
+        {% else %}
+          {{ is_state(enabled_helper, 'on') }}
+        {% endif %}
+
+      # Effective profile: runtime variable "profile" if passed, else helper state.
+      effective_profile: >-
+        {% set p = (profile | default(states(profile_helper), true)) | lower %}
+        {% if p in ['normal','sleep','wake'] %}{{ p }}{% else %}normal{% endif %}
+
+      is_home: "{{ (expand(persons) | selectattr('state','eq','home') | list | count) > 0 }}"
+      occupancy: "{{ 'home' if is_home else 'away' }}"
+
+      current_mode: "{{ states(climate_entity) | lower }}"
+      current_setpoint: "{{ state_attr(climate_entity, 'temperature') | float(0) }}"
+
+      # ---------- Sensor averaging helpers (templates) ----------
+      outdoor_temp_f: >-
+        {% set vals = [] %}
+        {% for e in outdoor_temp_sensors %}
+          {% set s = states(e) %}
+          {% if is_number(s) %}
+            {% set f = s | float %}
+            {% if f >= out_t_min and f <= out_t_max %}
+              {% set vals = vals + [f] %}
+            {% endif %}
+          {% endif %}
+        {% endfor %}
+        {% if vals | length > 0 %}
+          {{ (vals | sum / (vals | length)) | round(2) }}
+        {% else %}
+          {{ 'unknown' }}
+        {% endif %}
+
+      outdoor_rh: >-
+        {% set vals = [] %}
+        {% for e in outdoor_humidity_sensors %}
+          {% set s = states(e) %}
+          {% if is_number(s) %}
+            {% set f = s | float %}
+            {% if f >= out_rh_min and f <= out_rh_max %}
+              {% set vals = vals + [f] %}
+            {% endif %}
+          {% endif %}
+        {% endfor %}
+        {% if vals | length > 0 %}
+          {{ (vals | sum / (vals | length)) | round(2) }}
+        {% else %}
+          {{ 'unknown' }}
+        {% endif %}
+
+      indoor_temp_f: >-
+        {% set vals = [] %}
+        {% for e in indoor_temp_sensors %}
+          {% set s = states(e) %}
+          {% if is_number(s) %}
+            {% set f = s | float %}
+            {% if f >= in_t_min and f <= in_t_max %}
+              {% set vals = vals + [f] %}
+            {% endif %}
+          {% endif %}
+        {% endfor %}
+        {% if vals | length > 0 %}
+          {{ (vals | sum / (vals | length)) | round(2) }}
+        {% else %}
+          {{ 'unknown' }}
+        {% endif %}
+
+      indoor_rh: >-
+        {% set vals = [] %}
+        {% for e in indoor_humidity_sensors %}
+          {% set s = states(e) %}
+          {% if is_number(s) %}
+            {% set f = s | float %}
+            {% if f >= in_rh_min and f <= in_rh_max %}
+              {% set vals = vals + [f] %}
+            {% endif %}
+          {% endif %}
+        {% endfor %}
+        {% if vals | length > 0 %}
+          {{ (vals | sum / (vals | length)) | round(2) }}
+        {% else %}
+          {{ 'unknown' }}
+        {% endif %}
+
+      # ---------- Mode decision ----------
+      base_mode_from_outdoor: >-
+        {% if is_number(outdoor_temp_f) %}
+          {% set t = outdoor_temp_f | float %}
+          {% if t >= cool_thr %}cool
+          {% elif t <= heat_thr %}heat
+          {% else %}hold{% endif %}
+        {% else %}
+          hold
+        {% endif %}
+
+      mode_after_indoor_temp: >-
+        {% set m = base_mode_from_outdoor %}
+        {% if is_number(indoor_temp_f) %}
+          {% set ti = indoor_temp_f | float %}
+          {% if ti >= in_t_hot %}cool
+          {% elif ti <= in_t_cold %}heat
+          {% else %}{{ m }}{% endif %}
+        {% else %}
+          {{ m }}
+        {% endif %}
+
+      rh_bias_trigger: "{{ (rh_std + rh_bias_delta) | float }}"
+      rh_override_trigger: "{{ (rh_std + rh_override_delta) | float }}"
+
+      desired_mode_pre_antiflap: >-
+        {% set m = mode_after_indoor_temp %}
+        {% if m == 'heat' %}
+          heat
+        {% elif indoor_humidity_sensors | length == 0 %}
+          {{ m }}
+        {% elif is_number(indoor_rh) %}
+          {% set rh = indoor_rh | float %}
+          {% if rh >= (rh_override_trigger | float) %}
+            cool
+          {% elif rh >= (rh_bias_trigger | float) and m == 'hold' %}
+            cool
+          {% else %}
+            {{ m }}
+          {% endif %}
+        {% else %}
+          {{ m }}
+        {% endif %}
+
+      desired_mode_resolved: >-
+        {% if desired_mode_pre_antiflap in ['heat','cool'] %}
+          {{ desired_mode_pre_antiflap }}
+        {% elif desired_mode_pre_antiflap == 'hold' %}
+          {{ current_mode }}
+        {% else %}
+          {{ current_mode }}
+        {% endif %}
+
+      seconds_since_last_mode_change: "{{ (now_epoch | float) - (states(last_mode_epoch_entity) | float(0)) }}"
+      allow_mode_change: "{{ seconds_since_last_mode_change >= (min_mode_mins | float * 60) }}"
+
+      final_mode: >-
+        {% if desired_mode_resolved in ['heat','cool'] and desired_mode_resolved != current_mode and allow_mode_change %}
+          {{ desired_mode_resolved }}
+        {% else %}
+          {{ current_mode }}
+        {% endif %}
+
+      # ---------- Target setpoint selection (dedicated) ----------
+      target_setpoint: >-
+        {% set mode = final_mode %}
+        {% if mode not in ['heat','cool'] %}
+          unknown
+        {% elif occupancy == 'away' %}
+          {{ away_heat if mode == 'heat' else away_cool }}
+        {% else %}
+          {% if effective_profile == 'sleep' %}
+            {{ home_sleep_heat if mode == 'heat' else home_sleep_cool }}
+          {% elif effective_profile == 'wake' %}
+            {{ home_wake_heat if mode == 'heat' else home_wake_cool }}
+          {% else %}
+            {{ home_normal_heat if mode == 'heat' else home_normal_cool }}
+          {% endif %}
+        {% endif %}
+
+      # ---------- Setpoint anti-chatter ----------
+      seconds_since_last_setpoint_change: "{{ (now_epoch | float) - (states(last_set_epoch_entity) | float(0)) }}"
+      allow_setpoint_change: "{{ seconds_since_last_setpoint_change >= (min_set_mins | float * 60) }}"
+      setpoint_delta: >-
+        {% if is_number(target_setpoint) %}
+          {{ ( (target_setpoint | float) - (current_setpoint | float) ) | abs }}
+        {% else %}
+          0
+        {% endif %}
+
+      need_setpoint_change: >-
+        {% if is_number(target_setpoint) and (final_mode in ['heat','cool']) %}
+          {{ (setpoint_delta | float) >= (min_set_delta | float) }}
+        {% else %}
+          false
+        {% endif %}
+
+      hvac_modes: "{{ state_attr(climate_entity, 'hvac_modes') | default([]) }}"
+      supports_target_mode: >-
+        {% if hvac_modes | length == 0 %}
+          true
+        {% else %}
+          {{ final_mode in hvac_modes }}
+        {% endif %}
+
+      need_mode_change: >-
+        {{
+          final_mode in ['heat','cool']
+          and final_mode != current_mode
+          and allow_mode_change
+          and supports_target_mode
+        }}
 
   - condition: template
-    value_template: "{{ held_long_enough or next_mode == last_mode }}"
+    value_template: "{{ enabled }}"
 
+  # --- Apply HVAC mode if needed/allowed ---
   - choose:
-      - conditions: "{{ next_mode != last_mode }}"
+      - conditions: "{{ need_mode_change }}"
         sequence:
           - service: climate.set_hvac_mode
             target:
-              entity_id: "{{ target_climate }}"
+              entity_id: "{{ climate_entity }}"
             data:
-              hvac_mode: "{{ next_mode }}"
-
-          - service: input_select.select_option
+              hvac_mode: "{{ final_mode }}"
+          - service: input_number.set_value
             target:
-              entity_id: "{{ last_mode_select }}"
+              entity_id: "{{ last_mode_epoch_entity }}"
             data:
-              option: "{{ next_mode }}"
+              value: "{{ now_epoch }}"
+          - choose:
+              - conditions: "{{ debug }}"
+                sequence:
+                  - service: logbook.log
+                    data:
+                      name: Smart Thermostat Engine
+                      message: >-
+                        HVAC mode set to {{ final_mode }} (occupancy={{ occupancy }}, profile={{ effective_profile }},
+                        Tout={{ outdoor_temp_f }}, Tin={{ indoor_temp_f }}, RHin={{ indoor_rh }}).
+                      entity_id: "{{ climate_entity }}"
 
-          - service: input_datetime.set_datetime
-            target:
-              entity_id: "{{ last_change_datetime }}"
-            data:
-              datetime: "{{ now().strftime('%Y-%m-%d %H:%M:%S') }}"
-
+  # --- Apply setpoint if needed/allowed ---
   - choose:
-      - conditions: "{{ next_mode in ['heat','cool'] }}"
+      - conditions: "{{ need_setpoint_change and allow_setpoint_change }}"
         sequence:
           - service: climate.set_temperature
             target:
-              entity_id: "{{ target_climate }}"
+              entity_id: "{{ climate_entity }}"
             data:
-              temperature: "{{ desired | round(1) }}"
+              temperature: "{{ target_setpoint | float }}"
+          - service: input_number.set_value
+            target:
+              entity_id: "{{ last_set_epoch_entity }}"
+            data:
+              value: "{{ now_epoch }}"
+          - choose:
+              - conditions: "{{ debug }}"
+                sequence:
+                  - service: logbook.log
+                    data:
+                      name: Smart Thermostat Engine
+                      message: >-
+                        Setpoint set to {{ target_setpoint }}°F (mode={{ final_mode }}, occupancy={{ occupancy }},
+                        profile={{ effective_profile }}, Δ={{ setpoint_delta }}).
+                      entity_id: "{{ climate_entity }}"
