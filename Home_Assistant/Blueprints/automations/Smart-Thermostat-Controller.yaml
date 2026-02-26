@@ -1,57 +1,493 @@
 blueprint:
-  name: Smart Thermostat Controller
+  name: Smart Thermostat Monitor
   description: >
-    Automation blueprint that periodically and reactively triggers the smart
-    thermostat apply script when temperature sensors, desired setpoint, or the
-    enable flag change.
+    Automatically controls thermostat based on outdoor temperature, indoor temperature,
+    humidity levels, and presence detection. Uses heat_cool (auto) mode as the default
+    for efficient dual-setpoint operation. Respects manual overrides with a configurable
+    timeout, and applies emergency overrides for extreme temperatures or humidity.
+    Applies Auxiliary preset for heating (gas preferred over electric) and Energy Cool
+    for cooling.
   domain: automation
+
   input:
-    apply_script:
-      name: Smart Thermostat Apply Script
-      description: Script created from the Smart Thermostat Apply blueprint.
+    # ─── Climate Entity ───────────────────────────────────────────────────────
+    climate_entity:
+      name: Climate Entity
+      description: The thermostat to control
       selector:
         entity:
-          domain: script
-    indoor_sensor:
-      name: Indoor Temperature Sensor
+          domain: climate
+
+    # ─── Presence ─────────────────────────────────────────────────────────────
+    presence_person_1:
+      name: First Person
+      description: First person entity for presence detection
+      selector:
+        entity:
+          domain: person
+
+    presence_person_2:
+      name: Second Person
+      description: Second person entity for presence detection
+      selector:
+        entity:
+          domain: person
+
+    home_zone:
+      name: Home Zone
+      description: Zone entity representing home
+      default: zone.home
+      selector:
+        entity:
+          domain: zone
+
+    # ─── Outdoor Temperature Sensors ─────────────────────────────────────────
+    outdoor_temp_sensors:
+      name: Outdoor Temperature Sensors
+      description: One or more outdoor temperature sensors (will be averaged)
       selector:
         entity:
           domain: sensor
-    outdoor_sensor:
-      name: Outdoor Temperature Sensor
+          device_class: temperature
+          multiple: true
+
+    # ─── Indoor Temperature Sensors ──────────────────────────────────────────
+    indoor_temp_sensors:
+      name: Indoor Temperature Sensors
+      description: One or more indoor temperature sensors (will be averaged)
       selector:
         entity:
           domain: sensor
-    desired_temperature:
-      name: Desired Temperature Number
+          device_class: temperature
+          multiple: true
+
+    # ─── Indoor Humidity Sensors ──────────────────────────────────────────────
+    indoor_humidity_sensors:
+      name: Indoor Humidity Sensors
+      description: One or more indoor humidity sensors (will be averaged)
       selector:
         entity:
-          domain: input_number
-    enable_boolean:
-      name: Enable Smart Thermostat
+          domain: sensor
+          device_class: humidity
+          multiple: true
+
+    # ─── Outdoor Temperature Thresholds ──────────────────────────────────────
+    outdoor_heat_threshold:
+      name: Outdoor Heating Threshold
+      description: >
+        Below this outdoor temperature the system will bias toward heating.
+        In heat_cool mode the thermostat will use its own logic within the
+        setpoint band; this threshold determines the band center.
+      default: 60
       selector:
-        entity:
-          domain: input_boolean
-    interval_minutes:
-      name: Recheck Interval (minutes)
+        number:
+          min: 30
+          max: 75
+          unit_of_measurement: "°F"
+
+    outdoor_cool_threshold:
+      name: Outdoor Cooling Threshold
+      description: >
+        Above this outdoor temperature the system will bias toward cooling.
+        Between the heat and cool thresholds is shoulder season where heat_cool
+        mode is used and off mode is possible when nobody is home.
+      default: 70
+      selector:
+        number:
+          min: 60
+          max: 90
+          unit_of_measurement: "°F"
+
+    # ─── Indoor Emergency Thresholds ─────────────────────────────────────────
+    indoor_too_cold:
+      name: Indoor Too Cold Emergency
+      description: >
+        If indoor temp drops below this, force heat mode immediately regardless
+        of outdoor temperature or manual override.
+      default: 65
+      selector:
+        number:
+          min: 55
+          max: 72
+          unit_of_measurement: "°F"
+
+    indoor_too_hot:
+      name: Indoor Too Hot Emergency
+      description: >
+        If indoor temp rises above this, force cool mode immediately regardless
+        of outdoor temperature or manual override.
+      default: 78
+      selector:
+        number:
+          min: 70
+          max: 85
+          unit_of_measurement: "°F"
+
+    # ─── Temperature Setpoints (Home) ─────────────────────────────────────────
+    heat_setpoint_home:
+      name: Heat Setpoint — Home
+      description: >
+        Lower bound of heat_cool band when someone is home. Heating activates
+        below this temperature.
+      default: 70
+      selector:
+        number:
+          min: 60
+          max: 80
+          unit_of_measurement: "°F"
+
+    cool_setpoint_home:
+      name: Cool Setpoint — Home
+      description: >
+        Upper bound of heat_cool band when someone is home. Cooling activates
+        above this temperature.
+      default: 74
+      selector:
+        number:
+          min: 65
+          max: 82
+          unit_of_measurement: "°F"
+
+    # ─── Temperature Setpoints (Away) ─────────────────────────────────────────
+    heat_setpoint_away:
+      name: Heat Setpoint — Away
+      description: >
+        Lower bound of heat_cool band when nobody is home. Keeps pipes and
+        pets safe without over-heating an empty house.
+      default: 65
+      selector:
+        number:
+          min: 55
+          max: 72
+          unit_of_measurement: "°F"
+
+    cool_setpoint_away:
+      name: Cool Setpoint — Away
+      description: >
+        Upper bound of heat_cool band when nobody is home. Prevents extreme
+        heat buildup without over-cooling an empty house.
+      default: 78
+      selector:
+        number:
+          min: 70
+          max: 85
+          unit_of_measurement: "°F"
+
+    # ─── Humidity Settings ────────────────────────────────────────────────────
+    high_humidity_threshold:
+      name: High Humidity Threshold
+      description: >
+        Above this humidity level for the configured duration, the system
+        forces cool mode to dehumidify. Overrides manual mode.
+      default: 60
+      selector:
+        number:
+          min: 40
+          max: 80
+          unit_of_measurement: "%"
+
+    dehumidify_temp:
+      name: Dehumidification Temperature
+      description: Target temperature when running in dehumidification mode
+      default: 70
+      selector:
+        number:
+          min: 65
+          max: 78
+          unit_of_measurement: "°F"
+
+    # ─── Duration Settings ────────────────────────────────────────────────────
+    outdoor_temp_duration:
+      name: Outdoor Temp Trigger Duration
+      description: >
+        How long outdoor temperature must remain past a threshold before
+        triggering a mode change. Prevents rapid cycling from noisy sensors.
       default: 5
       selector:
         number:
           min: 1
-          max: 60
-          step: 1
-          mode: slider
+          max: 30
+          unit_of_measurement: "minutes"
+
+    indoor_temp_duration:
+      name: Indoor Temp Emergency Duration
+      description: >
+        How long indoor temperature must remain at an emergency level before
+        overriding. Short enough to respond to real emergencies.
+      default: 10
+      selector:
+        number:
+          min: 1
+          max: 30
+          unit_of_measurement: "minutes"
+
+    humidity_duration:
+      name: High Humidity Duration
+      description: How long humidity must remain high before triggering dehumidification
+      default: 30
+      selector:
+        number:
+          min: 5
+          max: 120
+          unit_of_measurement: "minutes"
+
+    # ─── Periodic Check ───────────────────────────────────────────────────────
+    periodic_check_interval:
+      name: Periodic Check Interval
+      description: >
+        How often to re-evaluate conditions even without a trigger event.
+        This catches situations where sensors didn't cross a threshold but
+        conditions have changed. Uses time_pattern format — choose an interval.
+      default: "/30"
+      selector:
+        select:
+          options:
+            - label: "Every 15 minutes"
+              value: "/15"
+            - label: "Every 30 minutes"
+              value: "/30"
+            - label: "Every hour"
+              value: "/60"
+
+    # ─── Manual Override ──────────────────────────────────────────────────────
+    manual_override_boolean:
+      name: Manual Override Boolean
+      description: Input boolean that tracks whether a manual override is active
+      default: input_boolean.thermostat_manual_mode
+      selector:
+        entity:
+          domain: input_boolean
+
+variables:
+  # Average outdoor temperature across all configured sensors
+  avg_outdoor_temp: >
+    {% set ns = namespace(total=0, count=0) %}
+    {% for sensor in outdoor_temp_sensors %}
+      {% set val = states(sensor) | float(-999) %}
+      {% if val != -999 %}
+        {% set ns.total = ns.total + val %}
+        {% set ns.count = ns.count + 1 %}
+      {% endif %}
+    {% endfor %}
+    {{ (ns.total / ns.count) | round(1) if ns.count > 0 else 0 }}
+
+  # Average indoor temperature across all configured sensors
+  avg_indoor_temp: >
+    {% set ns = namespace(total=0, count=0) %}
+    {% for sensor in indoor_temp_sensors %}
+      {% set val = states(sensor) | float(-999) %}
+      {% if val != -999 %}
+        {% set ns.total = ns.total + val %}
+        {% set ns.count = ns.count + 1 %}
+      {% endif %}
+    {% endfor %}
+    {{ (ns.total / ns.count) | round(1) if ns.count > 0 else 0 }}
+
+  # Average indoor humidity across all configured sensors
+  avg_indoor_humidity: >
+    {% set ns = namespace(total=0, count=0) %}
+    {% for sensor in indoor_humidity_sensors %}
+      {% set val = states(sensor) | float(-999) %}
+      {% if val != -999 %}
+        {% set ns.total = ns.total + val %}
+        {% set ns.count = ns.count + 1 %}
+      {% endif %}
+    {% endfor %}
+    {{ (ns.total / ns.count) | round(1) if ns.count > 0 else 0 }}
+
+  # Is anyone currently home?
+  anyone_home: >
+    {{ is_state(presence_person_1, 'home') or is_state(presence_person_2, 'home') }}
+
+  # Are we in the process of both people leaving?
+  leaving_home: >
+    {% set trigger_entity = trigger.entity_id | default('') %}
+    {% if trigger_entity in [presence_person_1, presence_person_2] %}
+      {{ trigger.to_state.state != 'home' and
+         not (is_state(presence_person_1, 'home') or is_state(presence_person_2, 'home')) }}
+    {% else %}
+      false
+    {% endif %}
+
+  # Is manual override active?
+  manual_mode_active: >
+    {{ is_state(manual_override_boolean, 'on') }}
+
+  # Is humidity at emergency levels?
+  humidity_emergency: >
+    {{ avg_indoor_humidity | float > high_humidity_threshold | float }}
+
+  # Is indoor temperature at emergency levels?
+  indoor_temp_emergency: >
+    {{ avg_indoor_temp | float < indoor_too_cold | float or
+       avg_indoor_temp | float > indoor_too_hot | float }}
+
+  # Is outdoor temp in shoulder season (between thresholds)?
+  shoulder_season: >
+    {{ avg_outdoor_temp | float >= outdoor_heat_threshold | float and
+       avg_outdoor_temp | float <= outdoor_cool_threshold | float }}
+
 trigger:
-  - platform: time_pattern
-    minutes: "/{{ interval_minutes }}"
+  # Presence changes
   - platform: state
-    entity_id:
-      - !input indoor_sensor
-      - !input outdoor_sensor
-      - !input desired_temperature
-      - !input enable_boolean
-mode: queued
+    entity_id: !input presence_person_1
+
+  - platform: state
+    entity_id: !input presence_person_2
+
+  # Outdoor temperature thresholds (with hysteresis via separate above/below triggers)
+  - platform: numeric_state
+    entity_id: !input outdoor_temp_sensors
+    below: !input outdoor_heat_threshold
+    for:
+      minutes: !input outdoor_temp_duration
+
+  - platform: numeric_state
+    entity_id: !input outdoor_temp_sensors
+    above: !input outdoor_cool_threshold
+    for:
+      minutes: !input outdoor_temp_duration
+
+  # Indoor temperature emergencies
+  - platform: numeric_state
+    entity_id: !input indoor_temp_sensors
+    below: !input indoor_too_cold
+    for:
+      minutes: !input indoor_temp_duration
+
+  - platform: numeric_state
+    entity_id: !input indoor_temp_sensors
+    above: !input indoor_too_hot
+    for:
+      minutes: !input indoor_temp_duration
+
+  # High humidity
+  - platform: numeric_state
+    entity_id: !input indoor_humidity_sensors
+    above: !input high_humidity_threshold
+    for:
+      minutes: !input humidity_duration
+
+  # Periodic re-evaluation (time_pattern uses /N format for "every N minutes")
+  - platform: time_pattern
+    minutes: !input periodic_check_interval
+
+condition: []
+
 action:
-  - service: script.turn_on
-    target:
-      entity_id: !input apply_script
+  # ── Step 1: Handle leaving home ──────────────────────────────────────────────
+  # Clear manual override immediately when both people leave
+  - if:
+      - condition: template
+        value_template: "{{ leaving_home }}"
+    then:
+      - service: input_boolean.turn_off
+        target:
+          entity_id: !input manual_override_boolean
+      - service: system_log.write
+        data:
+          message: "Smart Thermostat: Last person left home — clearing manual override."
+          level: info
+
+  # ── Step 2: Check if we should act ───────────────────────────────────────────
+  # Always act on emergencies and leaving home. Otherwise only act if not in manual mode.
+  - if:
+      - condition: template
+        value_template: >
+          {{ humidity_emergency or indoor_temp_emergency or leaving_home or not manual_mode_active }}
+    then:
+      # ── Step 3: Determine target mode and setpoints ─────────────────────────
+      - variables:
+          # Priority order:
+          # 1. Humidity emergency → cool (dehumidify), ignores all else
+          # 2. Indoor too cold → force heat emergency
+          # 3. Indoor too hot → force cool emergency
+          # 4. Nobody home + shoulder season → off (no need to condition empty house)
+          # 5. Default → heat_cool (auto) with presence-appropriate setpoints
+          target_mode: >
+            {% if humidity_emergency %}
+              cool
+            {% elif avg_indoor_temp | float < indoor_too_cold | float %}
+              heat
+            {% elif avg_indoor_temp | float > indoor_too_hot | float %}
+              cool
+            {% elif not anyone_home and shoulder_season %}
+              off
+            {% else %}
+              heat_cool
+            {% endif %}
+
+          # Low setpoint for heat_cool mode (or single setpoint for heat/cool)
+          effective_low: >
+            {% if anyone_home %}
+              {{ heat_setpoint_home | float }}
+            {% else %}
+              {{ heat_setpoint_away | float }}
+            {% endif %}
+
+          # High setpoint for heat_cool mode (or single setpoint override)
+          effective_high: >
+            {% if anyone_home %}
+              {{ cool_setpoint_home | float }}
+            {% else %}
+              {{ cool_setpoint_away | float }}
+            {% endif %}
+
+          # Single setpoint used for emergency heat/cool modes
+          effective_single_temp: >
+            {% if humidity_emergency %}
+              {{ dehumidify_temp | float }}
+            {% elif avg_indoor_temp | float < indoor_too_cold | float %}
+              {% if anyone_home %}
+                {{ heat_setpoint_home | float }}
+              {% else %}
+                {{ heat_setpoint_away | float }}
+              {% endif %}
+            {% else %}
+              {% if anyone_home %}
+                {{ cool_setpoint_home | float }}
+              {% else %}
+                {{ cool_setpoint_away | float }}
+              {% endif %}
+            {% endif %}
+
+      # ── Step 4: Log the decision ─────────────────────────────────────────────
+      - service: system_log.write
+        data:
+          message: >
+            Smart Thermostat: Mode={{ target_mode }},
+            {% if target_mode == 'heat_cool' %}
+              Band={{ effective_low }}°F–{{ effective_high }}°F
+            {% elif target_mode == 'off' %}
+              Off (shoulder season, nobody home)
+            {% else %}
+              Target={{ effective_single_temp }}°F
+            {% endif %}
+            | Outdoor={{ avg_outdoor_temp }}°F, Indoor={{ avg_indoor_temp }}°F,
+              Humidity={{ avg_indoor_humidity }}%, Home={{ anyone_home }},
+              Humidity_Emergency={{ humidity_emergency }},
+              Temp_Emergency={{ indoor_temp_emergency }}
+          level: info
+
+      # ── Step 5: Call the control script ─────────────────────────────────────
+      - service: script.smart_thermostat_control
+        data:
+          mode: "{{ target_mode }}"
+          target_temp: "{{ effective_single_temp }}"
+          target_temp_low: "{{ effective_low }}"
+          target_temp_high: "{{ effective_high }}"
+          humidity_override: "{{ humidity_emergency }}"
+          dehumidify_temp: !input dehumidify_temp
+          set_energy_preset: true
+
+    else:
+      # Manual mode active, no emergency — skip and log
+      - service: system_log.write
+        data:
+          message: >
+            Smart Thermostat: Manual override active — skipping automatic adjustment.
+            (Outdoor={{ avg_outdoor_temp }}°F, Indoor={{ avg_indoor_temp }}°F)
+          level: info
+
+mode: single
+max_exceeded: silent
