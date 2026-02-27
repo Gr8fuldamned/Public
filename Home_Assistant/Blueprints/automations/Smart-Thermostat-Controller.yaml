@@ -3,7 +3,7 @@ blueprint:
   description: >
     Automatically controls thermostat based on outdoor temperature, indoor temperature,
     humidity levels, and presence detection. Uses heat_cool (auto) mode as the default
-    for efficient dual-setpoint operation. Respects manual overrides with a configurable
+    for efficient dual-setpoint operation. Respects manual overrides with a 1-hour
     timeout, and applies emergency overrides for extreme temperatures or humidity.
     Applies Auxiliary preset for heating (gas preferred over electric) and Energy Cool
     for cooling.
@@ -41,7 +41,7 @@ blueprint:
         entity:
           domain: zone
 
-    # ─── Outdoor Temperature Sensors ─────────────────────────────────────────
+    # ─── Sensors ──────────────────────────────────────────────────────────────
     outdoor_temp_sensors:
       name: Outdoor Temperature Sensors
       description: One or more outdoor temperature sensors (will be averaged)
@@ -51,7 +51,6 @@ blueprint:
           device_class: temperature
           multiple: true
 
-    # ─── Indoor Temperature Sensors ──────────────────────────────────────────
     indoor_temp_sensors:
       name: Indoor Temperature Sensors
       description: One or more indoor temperature sensors (will be averaged)
@@ -61,7 +60,6 @@ blueprint:
           device_class: temperature
           multiple: true
 
-    # ─── Indoor Humidity Sensors ──────────────────────────────────────────────
     indoor_humidity_sensors:
       name: Indoor Humidity Sensors
       description: One or more indoor humidity sensors (will be averaged)
@@ -74,8 +72,7 @@ blueprint:
     # ─── Outdoor Temperature Thresholds ──────────────────────────────────────
     outdoor_heat_threshold:
       name: Outdoor Heating Threshold
-      description: >
-        Below this outdoor temperature the system will bias toward heating.
+      description: Below this outdoor temperature the system biases toward heating.
       default: 60
       selector:
         number:
@@ -86,8 +83,8 @@ blueprint:
     outdoor_cool_threshold:
       name: Outdoor Cooling Threshold
       description: >
-        Above this outdoor temperature the system will bias toward cooling.
-        Between the heat and cool thresholds is shoulder season.
+        Above this outdoor temperature the system biases toward cooling.
+        Between the two thresholds is shoulder season.
       default: 70
       selector:
         number:
@@ -99,8 +96,8 @@ blueprint:
     indoor_too_cold:
       name: Indoor Too Cold Emergency
       description: >
-        If indoor temp drops below this, force heat mode immediately regardless
-        of outdoor temperature or manual override.
+        If indoor temp drops below this, force heat mode regardless of outdoor
+        temperature or manual override.
       default: 65
       selector:
         number:
@@ -111,8 +108,8 @@ blueprint:
     indoor_too_hot:
       name: Indoor Too Hot Emergency
       description: >
-        If indoor temp rises above this, force cool mode immediately regardless
-        of outdoor temperature or manual override.
+        If indoor temp rises above this, force cool mode regardless of outdoor
+        temperature or manual override.
       default: 78
       selector:
         number:
@@ -166,8 +163,8 @@ blueprint:
     high_humidity_threshold:
       name: High Humidity Threshold
       description: >
-        Above this humidity level for the configured duration, the system
-        forces cool mode to dehumidify. Overrides manual mode.
+        Above this level the system forces cool mode to dehumidify.
+        Overrides manual mode.
       default: 60
       selector:
         number:
@@ -177,7 +174,7 @@ blueprint:
 
     dehumidify_temp:
       name: Dehumidification Temperature
-      description: Target temperature when running in dehumidification mode
+      description: Target temperature when running in dehumidification mode.
       default: 70
       selector:
         number:
@@ -185,52 +182,19 @@ blueprint:
           max: 78
           unit_of_measurement: "°F"
 
-    # ─── Duration Settings ────────────────────────────────────────────────────
-    outdoor_temp_duration:
-      name: Outdoor Temp Trigger Duration (minutes)
-      description: >
-        How long the averaged outdoor temperature must remain past a threshold
-        before triggering. Prevents rapid cycling from noisy sensors.
-      default: 5
-      selector:
-        number:
-          min: 1
-          max: 30
-          unit_of_measurement: "minutes"
-
-    indoor_temp_duration:
-      name: Indoor Temp Emergency Duration (minutes)
-      description: >
-        How long the averaged indoor temperature must remain at an emergency
-        level before overriding.
-      default: 10
-      selector:
-        number:
-          min: 1
-          max: 30
-          unit_of_measurement: "minutes"
-
-    humidity_duration:
-      name: High Humidity Duration (minutes)
-      description: How long humidity must remain high before triggering dehumidification
-      default: 30
-      selector:
-        number:
-          min: 5
-          max: 120
-          unit_of_measurement: "minutes"
-
     # ─── Manual Override ──────────────────────────────────────────────────────
     manual_override_boolean:
       name: Manual Override Boolean
-      description: Input boolean that tracks whether a manual override is active
+      description: Input boolean that tracks whether a manual override is active.
       default: input_boolean.thermostat_manual_mode
       selector:
         entity:
           domain: input_boolean
 
 variables:
-  # Average outdoor temperature — skips unavailable sensors
+  # All threshold comparisons happen here in variables, not in triggers.
+  # This avoids the !input-inside-value_template syntax error.
+
   avg_outdoor_temp: >
     {% set ns = namespace(total=0, count=0) %}
     {% for sensor in outdoor_temp_sensors %}
@@ -242,7 +206,6 @@ variables:
     {% endfor %}
     {{ (ns.total / ns.count) | round(1) if ns.count > 0 else 0 }}
 
-  # Average indoor temperature — skips unavailable sensors
   avg_indoor_temp: >
     {% set ns = namespace(total=0, count=0) %}
     {% for sensor in indoor_temp_sensors %}
@@ -254,7 +217,6 @@ variables:
     {% endfor %}
     {{ (ns.total / ns.count) | round(1) if ns.count > 0 else 0 }}
 
-  # Average indoor humidity — skips unavailable sensors
   avg_indoor_humidity: >
     {% set ns = namespace(total=0, count=0) %}
     {% for sensor in indoor_humidity_sensors %}
@@ -266,11 +228,9 @@ variables:
     {% endfor %}
     {{ (ns.total / ns.count) | round(1) if ns.count > 0 else 0 }}
 
-  # Is anyone currently home?
   anyone_home: >
     {{ is_state(presence_person_1, 'home') or is_state(presence_person_2, 'home') }}
 
-  # Are we in the process of both people leaving?
   leaving_home: >
     {% set trigger_entity = trigger.entity_id | default('') %}
     {% if trigger_entity in [presence_person_1, presence_person_2] %}
@@ -280,26 +240,34 @@ variables:
       false
     {% endif %}
 
-  # Is manual override active?
   manual_mode_active: >
     {{ is_state(manual_override_boolean, 'on') }}
 
-  # Is humidity at emergency levels?
+  # Threshold comparisons use the averaged values computed above.
+  # These are safe here because variables are resolved at run time, not parse time.
+  outdoor_needs_heat: >
+    {{ avg_outdoor_temp | float < outdoor_heat_threshold | float }}
+
+  outdoor_needs_cool: >
+    {{ avg_outdoor_temp | float > outdoor_cool_threshold | float }}
+
+  shoulder_season: >
+    {{ not outdoor_needs_heat and not outdoor_needs_cool }}
+
   humidity_emergency: >
     {{ avg_indoor_humidity | float > high_humidity_threshold | float }}
 
-  # Is indoor temperature at emergency levels?
-  indoor_temp_emergency: >
-    {{ avg_indoor_temp | float < indoor_too_cold | float or
-       avg_indoor_temp | float > indoor_too_hot | float }}
+  indoor_too_cold_now: >
+    {{ avg_indoor_temp | float < indoor_too_cold | float }}
 
-  # Is outdoor temp in shoulder season (between thresholds)?
-  shoulder_season: >
-    {{ avg_outdoor_temp | float >= outdoor_heat_threshold | float and
-       avg_outdoor_temp | float <= outdoor_cool_threshold | float }}
+  indoor_too_hot_now: >
+    {{ avg_indoor_temp | float > indoor_too_hot | float }}
+
+  indoor_temp_emergency: >
+    {{ indoor_too_cold_now or indoor_too_hot_now }}
 
 trigger:
-  # ── Presence changes ─────────────────────────────────────────────────────────
+  # Presence changes — platform: state works correctly with !input entity lists
   - platform: state
     entity_id: !input presence_person_1
     id: presence_change
@@ -308,97 +276,23 @@ trigger:
     entity_id: !input presence_person_2
     id: presence_change
 
-  # ── Outdoor temp dropped below heating threshold ──────────────────────────────
-  # Template triggers are used throughout because numeric_state triggers do not
-  # reliably accept a list of entity IDs via blueprint !input substitution.
-  # Template triggers also correctly act on the *average* of multiple sensors.
-  - platform: template
-    value_template: >
-      {% set sensors = !input outdoor_temp_sensors %}
-      {% set ns = namespace(total=0, count=0) %}
-      {% for sensor in sensors %}
-        {% set val = states(sensor) | float(-999) %}
-        {% if val != -999 %}
-          {% set ns.total = ns.total + val %}
-          {% set ns.count = ns.count + 1 %}
-        {% endif %}
-      {% endfor %}
-      {{ (ns.total / ns.count) | round(1) < !input outdoor_heat_threshold if ns.count > 0 else false }}
-    for:
-      minutes: !input outdoor_temp_duration
-    id: outdoor_cold
+  # Sensor state changes — fire whenever any sensor updates.
+  # Threshold evaluation happens in the action variables block, not here.
+  # platform: state works correctly with !input multiple-entity lists.
+  - platform: state
+    entity_id: !input outdoor_temp_sensors
+    id: outdoor_temp_changed
 
-  # ── Outdoor temp rose above cooling threshold ─────────────────────────────────
-  - platform: template
-    value_template: >
-      {% set sensors = !input outdoor_temp_sensors %}
-      {% set ns = namespace(total=0, count=0) %}
-      {% for sensor in sensors %}
-        {% set val = states(sensor) | float(-999) %}
-        {% if val != -999 %}
-          {% set ns.total = ns.total + val %}
-          {% set ns.count = ns.count + 1 %}
-        {% endif %}
-      {% endfor %}
-      {{ (ns.total / ns.count) | round(1) > !input outdoor_cool_threshold if ns.count > 0 else false }}
-    for:
-      minutes: !input outdoor_temp_duration
-    id: outdoor_hot
+  - platform: state
+    entity_id: !input indoor_temp_sensors
+    id: indoor_temp_changed
 
-  # ── Indoor temp dropped to emergency level ────────────────────────────────────
-  - platform: template
-    value_template: >
-      {% set sensors = !input indoor_temp_sensors %}
-      {% set ns = namespace(total=0, count=0) %}
-      {% for sensor in sensors %}
-        {% set val = states(sensor) | float(-999) %}
-        {% if val != -999 %}
-          {% set ns.total = ns.total + val %}
-          {% set ns.count = ns.count + 1 %}
-        {% endif %}
-      {% endfor %}
-      {{ (ns.total / ns.count) | round(1) < !input indoor_too_cold if ns.count > 0 else false }}
-    for:
-      minutes: !input indoor_temp_duration
-    id: indoor_cold_emergency
+  - platform: state
+    entity_id: !input indoor_humidity_sensors
+    id: humidity_changed
 
-  # ── Indoor temp rose to emergency level ───────────────────────────────────────
-  - platform: template
-    value_template: >
-      {% set sensors = !input indoor_temp_sensors %}
-      {% set ns = namespace(total=0, count=0) %}
-      {% for sensor in sensors %}
-        {% set val = states(sensor) | float(-999) %}
-        {% if val != -999 %}
-          {% set ns.total = ns.total + val %}
-          {% set ns.count = ns.count + 1 %}
-        {% endif %}
-      {% endfor %}
-      {{ (ns.total / ns.count) | round(1) > !input indoor_too_hot if ns.count > 0 else false }}
-    for:
-      minutes: !input indoor_temp_duration
-    id: indoor_hot_emergency
-
-  # ── Humidity rose to emergency level ──────────────────────────────────────────
-  - platform: template
-    value_template: >
-      {% set sensors = !input indoor_humidity_sensors %}
-      {% set ns = namespace(total=0, count=0) %}
-      {% for sensor in sensors %}
-        {% set val = states(sensor) | float(-999) %}
-        {% if val != -999 %}
-          {% set ns.total = ns.total + val %}
-          {% set ns.count = ns.count + 1 %}
-        {% endif %}
-      {% endfor %}
-      {{ (ns.total / ns.count) | round(1) > !input high_humidity_threshold if ns.count > 0 else false }}
-    for:
-      minutes: !input humidity_duration
-    id: humidity_high
-
-  # ── Periodic re-evaluation every 30 minutes ───────────────────────────────────
-  # Catches drift and shoulder-season transitions that don't cross a threshold.
-  # Hardcoded to avoid blueprint input substitution quirks with time_pattern.
+  # Periodic re-evaluation every 30 minutes regardless of sensor changes.
+  # Catches shoulder-season transitions and drift without needing a trigger event.
   - platform: time_pattern
     minutes: "/30"
     id: periodic_check
@@ -406,7 +300,7 @@ trigger:
 condition: []
 
 action:
-  # ── Step 1: Handle leaving home ──────────────────────────────────────────────
+  # ── Step 1: Clear manual override when last person leaves ─────────────────────
   - if:
       - condition: template
         value_template: "{{ leaving_home }}"
@@ -416,23 +310,23 @@ action:
           entity_id: !input manual_override_boolean
       - service: system_log.write
         data:
-          message: "Smart Thermostat: Last person left home — clearing manual override."
+          message: "Smart Thermostat: Last person left — clearing manual override."
           level: info
 
-  # ── Step 2: Gate on emergencies or non-manual-mode ───────────────────────────
+  # ── Step 2: Gate — act on emergencies always, otherwise skip if manual mode ───
   - if:
       - condition: template
         value_template: >
           {{ humidity_emergency or indoor_temp_emergency or leaving_home or not manual_mode_active }}
     then:
-      # ── Step 3: Determine target mode and setpoints ─────────────────────────
+      # ── Step 3: Resolve target mode and setpoints ───────────────────────────
       - variables:
           target_mode: >
             {% if humidity_emergency %}
               cool
-            {% elif avg_indoor_temp | float < indoor_too_cold | float %}
+            {% elif indoor_too_cold_now %}
               heat
-            {% elif avg_indoor_temp | float > indoor_too_hot | float %}
+            {% elif indoor_too_hot_now %}
               cool
             {% elif not anyone_home and shoulder_season %}
               off
@@ -457,7 +351,7 @@ action:
           effective_single_temp: >
             {% if humidity_emergency %}
               {{ dehumidify_temp | float }}
-            {% elif avg_indoor_temp | float < indoor_too_cold | float %}
+            {% elif indoor_too_cold_now %}
               {% if anyone_home %}
                 {{ heat_setpoint_home | float }}
               {% else %}
@@ -471,26 +365,22 @@ action:
               {% endif %}
             {% endif %}
 
-      # ── Step 4: Log the decision ─────────────────────────────────────────────
+      # ── Step 4: Log decision ────────────────────────────────────────────────
       - service: system_log.write
         data:
           message: >
-            Smart Thermostat [trigger={{ trigger.id | default('unknown') }}]:
-            Mode={{ target_mode }},
-            {% if target_mode == 'heat_cool' %}
-              Band={{ effective_low }}°F–{{ effective_high }}°F,
-            {% elif target_mode == 'off' %}
-              Off (shoulder season, nobody home),
-            {% else %}
-              Target={{ effective_single_temp }}°F,
+            Smart Thermostat [{{ trigger.id | default('unknown') }}]:
+            mode={{ target_mode }},
+            {% if target_mode == 'heat_cool' %}band={{ effective_low }}–{{ effective_high }}°F,
+            {% elif target_mode == 'off' %}off (shoulder season, nobody home),
+            {% else %}target={{ effective_single_temp }}°F,
             {% endif %}
-            Outdoor={{ avg_outdoor_temp }}°F, Indoor={{ avg_indoor_temp }}°F,
-            Humidity={{ avg_indoor_humidity }}%, Home={{ anyone_home }},
-            Humidity_Emergency={{ humidity_emergency }},
-            Temp_Emergency={{ indoor_temp_emergency }}
+            outdoor={{ avg_outdoor_temp }}°F, indoor={{ avg_indoor_temp }}°F,
+            humidity={{ avg_indoor_humidity }}%, home={{ anyone_home }},
+            hum_emergency={{ humidity_emergency }}, temp_emergency={{ indoor_temp_emergency }}
           level: info
 
-      # ── Step 5: Call the control script ─────────────────────────────────────
+      # ── Step 5: Call the control script ────────────────────────────────────
       - service: script.smart_thermostat_control
         data:
           mode: "{{ target_mode }}"
@@ -505,9 +395,9 @@ action:
       - service: system_log.write
         data:
           message: >
-            Smart Thermostat [trigger={{ trigger.id | default('unknown') }}]:
-            Manual override active — skipping automatic adjustment.
-            (Outdoor={{ avg_outdoor_temp }}°F, Indoor={{ avg_indoor_temp }}°F)
+            Smart Thermostat [{{ trigger.id | default('unknown') }}]:
+            manual override active — skipping.
+            (outdoor={{ avg_outdoor_temp }}°F, indoor={{ avg_indoor_temp }}°F)
           level: info
 
 mode: single
